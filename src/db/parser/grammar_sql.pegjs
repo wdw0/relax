@@ -1739,8 +1739,29 @@ expr_precedence2
 / expr_precedence1
 
 expr_precedence1
-= expr_boolean_negation
+= valueExprExists
+/ expr_boolean_negation
 / expr_precedence0
+
+valueExprExists
+= neg:('not'i __)? 'exists'i _ '(' _ sub:statement _ ')'
+	{
+		return {
+			type: 'valueExpr',
+			datatype: 'boolean',
+			func: (neg !== null) ? 'notExists' : 'exists',
+			args: [{
+				type: 'valueExpr',
+				datatype: 'null',
+				func: 'statementSubquery',
+				args: [sub],
+
+				codeInfo: getCodeInfo()
+			}],
+
+			codeInfo: getCodeInfo()
+		};
+	}
 
 expr_precedence0
 = valueExprConstants

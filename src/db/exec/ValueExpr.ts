@@ -531,6 +531,14 @@ export class ValueExprGeneric extends ValueExpr {
 				});
 				return this._func === 'in' ? found : !found;
 			}
+			case 'exists':
+			case 'notExists': {
+				if (!Array.isArray(a)) {
+					throw new Error(`${this._func} expects a subquery result`);
+				}
+				const hasRows = a.length > 0;
+				return this._func === 'exists' ? hasRows : !hasRows;
+			}
 			default:
 				throw new Error('this should not happen!');
 		}
@@ -771,6 +779,10 @@ export class ValueExprGeneric extends ValueExpr {
 					}
 				}
 				break;
+			case 'exists':
+			case 'notExists':
+				this._args[0].check(schemaA, schemaB);
+				return true;
 			default:
 				throw new Error('this should not happen!');
 		}
@@ -1443,6 +1455,15 @@ export class ValueExprGeneric extends ValueExpr {
 					return `<span>${inExpr}</span>`;
 				} else {
 					return `<span>¬ (${inExpr})</span>`;
+				}
+			}
+			case 'exists':
+			case 'notExists': {
+				const subqueryFormula = this._args[0]._args[0].getFormulaHtml(false, false);
+				if (_func === 'exists') {
+					return `<span>∃ ${subqueryFormula}</span>`;
+				} else {
+					return `<span>¬∃ ${subqueryFormula}</span>`;
 				}
 			}
 			case 'list': {

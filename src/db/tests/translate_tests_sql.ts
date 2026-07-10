@@ -1660,3 +1660,102 @@ QUnit.test('test NOT IN complex expression uses Difference instead of AntiJoin',
 	assert.equal(root.getResult().getRows().length, srcTableR.getResult().getRows().length, 'should return all rows from R (no S.d value matches any a+1)');
 	assert.notOk(root.getFormulaHtml(false, false).includes('AntiJoin'), 'tree should not contain AntiJoin');
 });
+
+QUnit.test('test selection EXISTS with subquery - subquery has rows', function (assert) {
+	const root = exec_sql("select distinct * from R where exists (select * from S)");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a, R.b, R.c
+		1,   'a', 'd'
+		3,   'c', 'c'
+		4,   'd', 'f'
+		5,   'd', 'b'
+		6,   'e', 'f'
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test selection NOT EXISTS with subquery - subquery has rows', function (assert) {
+	const root = exec_sql("select distinct * from R where not exists (select * from S)");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a:number, R.b:string, R.c:string
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test selection EXISTS with subquery - subquery is empty', function (assert) {
+	const root = exec_sql("select distinct * from R where exists (select * from S where b = 'zzz')");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a:number, R.b:string, R.c:string
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test selection NOT EXISTS with subquery - subquery is empty', function (assert) {
+	const root = exec_sql("select distinct * from R where not exists (select * from S where b = 'zzz')");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a, R.b, R.c
+		1,   'a', 'd'
+		3,   'c', 'c'
+		4,   'd', 'f'
+		5,   'd', 'b'
+		6,   'e', 'f'
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test EXISTS combined with AND', function (assert) {
+	const root = exec_sql("select distinct * from R where c = 'f' and exists (select * from S)");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a, R.b, R.c
+		4,   'd', 'f'
+		6,   'e', 'f'
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test EXISTS combined with OR', function (assert) {
+	const root = exec_sql("select distinct * from R where c = 'd' or exists (select * from S where b = 'zzz')");
+
+	const ref = relalgjs.executeRelalg(`{
+		R.a, R.b, R.c
+		1,   'a', 'd'
+	}`);
+
+	assert.deepEqual(root.getResult(), ref.getResult());
+});
+
+QUnit.test('test NOT EXISTS combined with other predicate (parentheses)', function (assert) {
+	const root = exec_sql("select distinct * from R where (c = 'f') or (not exists (select * from S where b = 'zzz'))");
+
+	assert.equal(root.getResult().getRows().length, srcTableR.getResult().getRows().length, 'should return all rows from R since NOT EXISTS is true for every row');
+});
+
+QUnit.test('test EXISTS with condition inside subquery referencing a specific value', function (assert) {
+	const root = exec_sql("select distinct * from R where exists (select * from T where d = 400)");
+
+	assert.equal(root.getResult().getRows().length, srcTableR.getResult().getRows().length, 'T has a row with d = 400, so all rows from R should be returned');
+});
+
+QUnit.test('test EXISTS decomposes into a SemiJoin (not a runtime-evaluated Selection)', function (assert) {
+	const root = exec_sql("select distinct * from R where exists (select * from S)");
+
+	assert.ok(root.getFormulaHtml(false, false).includes('⋉'), 'tree should contain a semi-join operator for EXISTS');
+});
+
+QUnit.test('test NOT EXISTS decomposes into Difference of a SemiJoin', function (assert) {
+	const root = exec_sql("select distinct * from R where not exists (select * from S)");
+
+	const formula = root.getFormulaHtml(true, false);
+	assert.ok(formula.includes('⋉'), 'tree should contain a semi-join operator for the inner EXISTS');
+	assert.ok(formula.includes('>-<'), 'tree should contain a difference operator for NOT EXISTS');
+});

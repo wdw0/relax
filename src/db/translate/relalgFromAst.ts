@@ -755,6 +755,19 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 		return null;
 	}
 
+	function extractExistsSubquery(node: any): { subqueryStatement: any, isNotExists: boolean } | null {
+		if (node && node.type === 'valueExpr' && node.datatype === 'boolean' &&
+			(node.func === 'exists' || node.func === 'notExists') &&
+			node.args && node.args.length >= 1 &&
+			node.args[0] && node.args[0].type === 'valueExpr' && node.args[0].func === 'statementSubquery') {
+			return {
+				subqueryStatement: node.args[0].args[0],
+				isNotExists: node.func === 'notExists',
+			};
+		}
+		return null;
+	}
+
 	function getLeftColumnInfo(expr: any): { name: string, alias: string | null } | null {
 		if (expr && expr.type === 'valueExpr' && expr.datatype === 'null' && expr.func === 'columnValue' &&
 			expr.args && expr.args.length >= 2 && typeof expr.args[0] === 'string') {
@@ -820,6 +833,28 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 		// selection
 		if (statement.where !== null) {
 			const whereArg = statement.where.arg;
+
+			function processExistsSubquery(root: RANode, existsInfo: { subqueryStatement: any, isNotExists: boolean }): RANode {
+				const subqueryRoot = rec(existsInfo.subqueryStatement);
+				subqueryRoot.check();
+				root.check();
+
+				// EXISTS does not correlate any column between the outer query and the
+				// subquery, so the join condition is simply "true": a semi-join with an
+				// always-true theta condition keeps every row of `root` iff `subqueryRoot`
+				// has at least one row, and keeps none if `subqueryRoot` is empty.
+				const joinCondition: JoinCondition = {
+					type: 'theta',
+					joinExpression: new ValueExpr.ValueExprGeneric('boolean', 'constant', [true]),
+				};
+
+				const semiJoin = new SemiJoin(root, subqueryRoot, true, joinCondition);
+
+				if (existsInfo.isNotExists) {
+					return new Difference(root, semiJoin);
+				}
+				return semiJoin;
+			}
 
 			function processInSubquery(root: RANode, inInfo: { leftExpr: any, subqueryStatement: any, isNotIn: boolean }): RANode {
 				const subqueryRoot = rec(inInfo.subqueryStatement);
@@ -934,15 +969,37 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 				}
 			}
 
-			// extract IN subqueries from AND conjunctions only
+			// extract IN and EXISTS subqueries from AND conjunctions only
 			// (OR would be semantically incorrect since SemiJoin acts as AND)
-			const extractedSubqueries: { leftExpr: any, subqueryStatement: any, isNotIn: boolean }[] = [];
+			type ExtractedSubquery =
+				| { kind: 'in', info: { leftExpr: any, subqueryStatement: any, isNotIn: boolean } }
+				| { kind: 'exists', info: { subqueryStatement: any, isNotExists: boolean } };
+
+			function processExtractedSubquery(root: RANode, extracted: ExtractedSubquery): RANode {
+				return extracted.kind === 'in'
+					? processInSubquery(root, extracted.info)
+					: processExistsSubquery(root, extracted.info);
+			}
+
+			function extractInOrExistsSubquery(expr: any): ExtractedSubquery | null {
+				const inInfo = extractInSubquery(expr);
+				if (inInfo) {
+					return { kind: 'in', info: inInfo };
+				}
+				const existsInfo = extractExistsSubquery(expr);
+				if (existsInfo) {
+					return { kind: 'exists', info: existsInfo };
+				}
+				return null;
+			}
+
+			const extractedSubqueries: ExtractedSubquery[] = [];
 			function replaceInSubqueries(expr: any): any {
 				if (!expr || expr.type !== 'valueExpr' || expr.datatype !== 'boolean') return expr;
 
-				const inInfo = extractInSubquery(expr);
-				if (inInfo) {
-					extractedSubqueries.push(inInfo);
+				const extracted = extractInOrExistsSubquery(expr);
+				if (extracted) {
+					extractedSubqueries.push(extracted);
 					return { type: 'valueExpr', datatype: 'boolean', func: 'constant', args: [true] };
 				}
 
@@ -965,23 +1022,23 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 
 				return expr;
 			}
-			function tryExtractOrWithIn(orExpr: any): RANode | null {
+			function tryExtractOrWithSubquery(orExpr: any): RANode | null {
 				if (!orExpr || orExpr.type !== 'valueExpr' || orExpr.datatype !== 'boolean' || orExpr.func !== 'or') {
 					return null;
 				}
 
-				const leftIn = extractInSubquery(orExpr.args[0]);
-				const rightIn = extractInSubquery(orExpr.args[1]);
+				const left = extractInOrExistsSubquery(orExpr.args[0]);
+				const right = extractInOrExistsSubquery(orExpr.args[1]);
 
-				if (!leftIn && !rightIn) {
+				if (!left && !right) {
 					return null;
 				}
 
 				let leftNode: RANode;
 				const leftRoot = rec(statement.from);
 				setCodeInfoFromNode(leftRoot, statement.from);
-				if (leftIn) {
-					leftNode = processInSubquery(leftRoot, leftIn);
+				if (left) {
+					leftNode = processExtractedSubquery(leftRoot, left);
 				} else {
 					leftNode = getSelection(leftRoot, orExpr.args[0], statement.where.codeInfo);
 				}
@@ -990,8 +1047,8 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 				let rightNode: RANode;
 				const rightRoot = rec(statement.from);
 				setCodeInfoFromNode(rightRoot, statement.from);
-				if (rightIn) {
-					rightNode = processInSubquery(rightRoot, rightIn);
+				if (right) {
+					rightNode = processExtractedSubquery(rightRoot, right);
 				} else {
 					rightNode = getSelection(rightRoot, orExpr.args[1], statement.where.codeInfo);
 				}
@@ -1011,16 +1068,16 @@ export function relalgFromSQLAstRoot(astRoot: sqlAst.rootSql | any, relations: {
 				}
 
 				for (const extracted of extractedSubqueries) {
-					root = processInSubquery(root, extracted);
+					root = processExtractedSubquery(root, extracted);
 					setCodeInfoFromNode(root, statement.where);
 				}
 			} else {
-				const inInfo = extractInSubquery(whereArg);
-				if (inInfo) {
-					root = processInSubquery(root, inInfo);
+				const extracted = extractInOrExistsSubquery(whereArg);
+				if (extracted) {
+					root = processExtractedSubquery(root, extracted);
 					setCodeInfoFromNode(root, statement.where);
 				} else {
-					const orResult = tryExtractOrWithIn(whereArg);
+					const orResult = tryExtractOrWithSubquery(whereArg);
 					if (orResult) {
 						root = orResult;
 						setCodeInfoFromNode(root, statement.where);

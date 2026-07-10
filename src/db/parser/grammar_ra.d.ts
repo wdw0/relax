@@ -422,5 +422,7 @@ declare module relalgAst {
 		| 'notIn'
 		| 'list'
 		| 'statementSubquery'
+		| 'exists'
+		| 'notExists'
 	);
 }
